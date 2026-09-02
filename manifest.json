@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 1,
+  "id": "com.leafbox.metar",
+  "name": "Aviation Weather",
+  "version": "0.1.0",
+  "author": "Robert (leafbox)",
+  "license": "MIT",
+  "homepage": "https://github.com/Snackwrap/omarchy-metar",
+  "repository": "https://github.com/Snackwrap/omarchy-metar",
+  "description": "METAR and TAF in the Omarchy bar: the flight category at your nearest airfield as a colored pill, the current observation decoded into plain English with a drawn wind barb and sky profile, the terminal forecast as a category timeline, neighbouring fields, and the raw reports.",
+  "keywords": ["metar", "taf", "aviation", "weather", "aviation weather", "flying", "pilot", "vfr", "ifr", "bar", "quickshell"],
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Aviation Weather",
+    "description": "Flight-category pill for an airfield, with the decoded METAR, the TAF timeline and nearby stations.",
+    "category": "Info",
+    "aliases": ["metar", "taf", "aviation", "aviation weather", "flying", "airport weather"],
+    "allowMultiple": true,
+    "defaultSection": "right",
+    "defaults": {
+      "station": "",
+      "latitude": "",
+      "longitude": "",
+      "pillContent": "category",
+      "timeFormat": "local",
+      "temperature": "C",
+      "defaultTab": "now",
+      "runwayHeading": "",
+      "alertCategory": "off",
+      "popupPosition": "icon"
+    },
+    "schema": [
+      {
+        "key": "station",
+        "type": "string",
+        "label": "Station (ICAO, e.g. KSFO — blank: nearest to your location)",
+        "defaultValue": ""
+      },
+      {
+        "key": "latitude",
+        "type": "string",
+        "label": "Latitude (blank: use your Omarchy weather location)",
+        "defaultValue": ""
+      },
+      {
+        "key": "longitude",
+        "type": "string",
+        "label": "Longitude (blank: use your Omarchy weather location)",
+        "defaultValue": ""
+      },
+      {
+        "key": "pillContent",
+        "type": "enum",
+        "label": "Bar pill shows",
+        "options": [
+          { "value": "category", "label": "Flight category" },
+          { "value": "station", "label": "Station identifier" },
+          { "value": "both", "label": "Both" },
+          { "value": "wind", "label": "Wind" }
+        ],
+        "defaultValue": "category"
+      },
+      {
+        "key": "timeFormat",
+        "type": "enum",
+        "label": "Times shown as",
+        "options": [
+          { "value": "local", "label": "Local time" },
+          { "value": "zulu", "label": "Zulu (UTC)" }
+        ],
+        "defaultValue": "local"
+      },
+      {
+        "key": "temperature",
+        "type": "enum",
+        "label": "Temperature",
+        "options": [
+          { "value": "C", "label": "Celsius" },
+          { "value": "F", "label": "Fahrenheit" }
+        ],
+        "defaultValue": "C"
+      },
+      {
+        "key": "defaultTab",
+        "type": "enum",
+        "label": "Default tab",
+        "options": [
+          { "value": "now", "label": "Now" },
+          { "value": "forecast", "label": "Forecast" },
+          { "value": "nearby", "label": "Nearby" },
+          { "value": "raw", "label": "Raw" }
+        ],
+        "defaultValue": "now"
+      },
+      {
+        "key": "runwayHeading",
+        "type": "string",
+        "label": "Runway heading for the crosswind component (e.g. 280 — blank: off)",
+        "defaultValue": ""
+      },
+      {
+        "key": "alertCategory",
+        "type": "enum",
+        "label": "Notify when conditions drop to",
+        "options": [
+          { "value": "off", "label": "Never" },
+          { "value": "MVFR", "label": "MVFR or worse" },
+          { "value": "IFR", "label": "IFR or worse" },
+          { "value": "LIFR", "label": "LIFR" }
+        ],
+        "defaultValue": "off"
+      },
+      {
+        "key": "popupPosition",
+        "type": "enum",
+        "label": "Popup position",
+        "options": [
+          { "value": "icon", "label": "Under the bar icon" },
+          { "value": "center", "label": "Centered on the bar" }
+        ],
+        "defaultValue": "icon"
+      }
+    ]
+  }
+}
