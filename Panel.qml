@@ -83,9 +83,11 @@ Panel {
     onFileChanged: reload()
     onLoaded: {
       try {
-        var d = JSON.parse(text())
+        var raw = String(text() || "")
+        if (raw.length > 8192) return
+        var d = JSON.parse(raw)
         root.weatherLocation = {
-          name: typeof d.name === "string" ? d.name : "",
+          name: typeof d.name === "string" ? d.name.slice(0, 80) : "",
           latitude: parseFloat(d.latitude),
           longitude: parseFloat(d.longitude)
         }
@@ -123,7 +125,8 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         try {
-          var r = JSON.parse(String(text || "")).results
+          var parsed = root.parseBounded(text)
+          var r = parsed ? parsed.results : null
           if (r && r.length) {
             root.geocodedLat = parseFloat(r[0].latitude)
             root.geocodedLon = parseFloat(r[0].longitude)
@@ -146,8 +149,10 @@ Panel {
   property bool loading: false
   property string lastError: ""
 
-  readonly property string stationId: obs ? String(obs.icaoId || "") : ""
-  readonly property string stationName: obs ? String(obs.name || "") : ""
+  // Both come from the API and both are displayed; the identifier also goes
+  // into a URL, so it is held to the shape an ICAO code actually has.
+  readonly property string stationId: obs ? String(obs.icaoId || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6) : ""
+  readonly property string stationName: obs ? safe(obs.name, 48) : ""
 
   // ---- Derived observation ----------------------------------------------
   readonly property double visSM: obs ? Met.visibilitySM(obs.visib) : NaN
@@ -230,8 +235,8 @@ Panel {
     if (notifiedCategory === category) return
     notifiedCategory = category
     notifyProc.command = ["omarchy-notification-send", "-g", glyph, "-u", "normal",
-                          stationId + " is " + category,
-                          Met.formatVisibility(visSM, visPlus) + ", ceiling " + Met.formatCeiling(ceilFt)]
+                          safe(stationId, 6) + " is " + category,
+                          safe(Met.formatVisibility(visSM, visPlus) + ", ceiling " + Met.formatCeiling(ceilFt), 80)]
     notifyProc.running = true
   }
 
@@ -262,8 +267,45 @@ Panel {
   // name — without it the pill still opens on a click but IPC does nothing.
   function openFromHotkey() { open() }
 
+  // ---- Remote data hygiene ----------------------------------------------
+  // Everything below arrives from a public API and ends up in a Text element or
+  // a notification. Two ceilings rather than one: curl refuses to download more
+  // than maxResponseBytes (the producer side, which also covers a server that
+  // simply never stops sending), and parseBounded rejects anything that got
+  // past it — a chunked response has no Content-Length for curl to check.
+  readonly property int maxResponseBytes: 262144
+  readonly property int maxFieldChars: 72
+
   function curlTo(url, seconds) {
-    return ["curl", "-fsS", "-A", ua, "--max-time", String(seconds), url]
+    return ["curl", "-fsS", "-A", ua,
+            "--proto", "=https",                 // refuse anything but https
+            "--max-time", String(seconds),
+            "--max-filesize", String(maxResponseBytes),
+            url]
+  }
+
+  function parseBounded(raw) {
+    var text = String(raw || "")
+    if (text.length === 0 || text.length > maxResponseBytes) return null
+    return JSON.parse(text)
+  }
+
+  // Qt's Text defaults to AutoText, which renders a string as *rich* text when
+  // it looks like markup. Every remote value is therefore forced through here:
+  // control characters out, length clamped, and the Text elements that show
+  // them are pinned to PlainText besides.
+  function safe(v, limit) {
+    var text = String(v === null || v === undefined ? "" : v)
+    text = text.replace(/[\u0000-\u001F\u007F]+/g, " ").replace(/^\s+|\s+$/g, "")
+    var cap = limit || maxFieldChars
+    return text.length > cap ? text.slice(0, cap) + "\u2026" : text
+  }
+
+  // An array from a remote payload is capped before anything walks it, so a
+  // hostile or broken response cannot turn into tens of thousands of delegates.
+  function boundedList(v, cap) {
+    if (!v || !v.length) return []
+    return v.length > cap ? v.slice(0, cap) : v
   }
 
   function refresh() {
@@ -297,6 +339,35 @@ Panel {
   // between, so ten minutes keeps the pill honest without hammering a public
   // government service. The forecast is reissued every six hours.
   Timer { interval: 600000; running: true; repeat: true; onTriggered: root.refresh() }
+
+  // curl's --max-time is curl's to honour, and it is the only clock the
+  // subprocess has. This is an independent one: any fetch still alive past its
+  // own limit plus a grace period is terminated from here, which also unsticks
+  // `loading` if a process wedges without ever exiting.
+  readonly property var guardedProcs: [stationProc, boxProc, tafProc, geocodeProc]
+  readonly property var guardLimits: [15, 20, 15, 8]
+  property var guardStarted: [0, 0, 0, 0]
+
+  Timer {
+    interval: 2000
+    running: true
+    repeat: true
+    onTriggered: {
+      var now = Date.now()
+      var started = root.guardStarted
+      for (var i = 0; i < root.guardedProcs.length; i++) {
+        var proc = root.guardedProcs[i]
+        if (!proc.running) { started[i] = 0; continue }
+        if (!started[i]) { started[i] = now; continue }
+        if (now - started[i] > (root.guardLimits[i] + 5) * 1000) {
+          proc.running = false      // Quickshell terminates the child
+          started[i] = 0
+          root.loading = false
+        }
+      }
+      root.guardStarted = started
+    }
+  }
   Timer { interval: 1000; running: true; repeat: true; onTriggered: root.nowMs = Date.now() }
 
   // Opening the panel is a good moment to be current.
@@ -350,8 +421,9 @@ Panel {
   onTafPeriodListChanged: if (view === "forecast" && opened) Qt.callLater(playForecast)
   onObsChanged: if (view === "now" && opened) Qt.callLater(playNow)
 
-  function applyObs(list) {
-    if (!list || !list.length) { lastError = "no observation"; return }
+  function applyObs(raw) {
+    var list = boundedList(raw, 60)
+    if (!list.length) { lastError = "no observation"; return }
     lastError = ""
     if (hasSite) {
       // Order by distance so the nearest is first and the Nearby tab is sorted.
@@ -375,7 +447,7 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         try {
-          root.applyObs(JSON.parse(String(text || "")))
+          root.applyObs(root.parseBounded(text))
         } catch (e) { root.lastError = "could not read the observation" }
       }
     }
@@ -403,7 +475,7 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         try {
-          var list = JSON.parse(String(text || ""))
+          var list = root.parseBounded(text)
           if (!list || !list.length) { root.lastError = "no station reporting nearby"; return }
           root.applyObs(list)
         } catch (e) { root.lastError = "could not read the observations" }
@@ -418,7 +490,7 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         try {
-          var arr = JSON.parse(String(text || ""))
+          var arr = root.parseBounded(text)
           if (!arr || !arr.length) {
             // Plenty of fields report a METAR and no TAF at all; that is normal
             // and the tab says so rather than looking broken.
@@ -430,7 +502,7 @@ Panel {
           var t = arr[0]
           root.rawTaf = String(t.rawTAF || "")
           root.tafIssuedMs = Number(t.issueTime ? Date.parse(t.issueTime) : 0)
-          root.tafPeriodList = Met.tafPeriods(t.fcsts)
+          root.tafPeriodList = Met.tafPeriods(root.boundedList(t.fcsts, 48))
           root.tafFor = root.stationId
         } catch (e) { root.tafPeriodList = []; root.rawTaf = "" }
       }
@@ -464,7 +536,7 @@ Panel {
 
   function skyText() {
     if (!obs) return "--"
-    var layers = obs.clouds || []
+    var layers = boundedList(obs.clouds, 8)
     if (!layers.length) return "clear"
     var out = []
     for (var i = 0; i < layers.length; i++) {
@@ -484,7 +556,7 @@ Panel {
       bits.push((p.wdir !== null && isFinite(p.wdir) && p.wdir > 0 ? Met.cardinal(p.wdir) : "VRB")
                 + " " + Math.round(p.wspd) + (p.wgst ? "G" + Math.round(p.wgst) : ""))
     }
-    var wx = Met.decodeWx(p.wx)
+    var wx = safe(Met.decodeWx(p.wx), 60)
     if (wx !== "") bits.push(wx)
     return bits.join(" · ")
   }
@@ -524,6 +596,7 @@ Panel {
             spacing: Style.space(7)
             anchors.left: parent.left
             Text {
+              textFormat: Text.PlainText
               text: root.glyph
               color: Color.accent
               font.family: Style.font.family
@@ -531,6 +604,7 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
             }
             Text {
+              textFormat: Text.PlainText
               text: "AVIATION WEATHER"
               color: Color.muted
               font.family: Style.font.family
@@ -542,6 +616,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             text: root.obs ? (root.stationId + (root.obs._nm !== undefined
@@ -560,6 +635,7 @@ Panel {
           Row {
             spacing: Style.space(9)
             Text {
+              textFormat: Text.PlainText
               text: root.category !== "" ? root.category : "—"
               color: root.category !== "" ? root.colorFor(root.category) : Color.muted
               font.family: Style.font.family
@@ -574,6 +650,7 @@ Panel {
               }
             }
             Text {
+              textFormat: Text.PlainText
               text: root.category !== "" ? Met.categoryName(root.category) : (root.lastError !== "" ? root.lastError : "loading")
               color: Color.popups.text
               font.family: Style.font.family
@@ -584,6 +661,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             text: root.stationName
             color: Color.muted
@@ -595,6 +673,7 @@ Panel {
           // A report that has stopped arriving is worse than no report, because
           // it still looks like weather. Say it plainly.
           Text {
+            textFormat: Text.PlainText
             visible: root.stale && root.obs
             width: parent.width
             text: "No report for " + Met.formatAge(root.ageMin) + " — this may be out of date"
@@ -657,6 +736,7 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
 
               Text {
+                textFormat: Text.PlainText
                 width: parent.width
                 text: Met.formatWind(root.windDir, root.windKt, root.gustKt)
                 color: Color.popups.text
@@ -665,6 +745,7 @@ Panel {
                 wrapMode: Text.WordWrap
               }
               Text {
+                textFormat: Text.PlainText
                 visible: root.crosswind !== null
                 text: "Crosswind " + (root.crosswind !== null ? Math.round(root.crosswind) : 0)
                       + " kt on runway " + Math.round(root.runwayHeading / 10)
@@ -673,9 +754,10 @@ Panel {
                 font.pixelSize: Style.space(12)
               }
               Text {
+                textFormat: Text.PlainText
                 visible: Met.decodeWx(root.obs ? root.obs.wxString : "") !== ""
                 width: parent.width
-                text: Met.decodeWx(root.obs ? root.obs.wxString : "")
+                text: root.safe(Met.decodeWx(root.obs ? root.obs.wxString : ""), 80)
                 color: root.colorFor("MVFR")
                 font.family: Style.font.family
                 font.pixelSize: Style.space(12)
@@ -689,7 +771,7 @@ Panel {
             id: skyProfile
             width: parent.width
             height: Style.space(126)
-            clouds: root.obs ? (root.obs.clouds || []) : []
+            clouds: root.obs ? root.boundedList(root.obs.clouds, 8) : []
             ceiling: root.ceilFt
             ceilingColor: root.category !== "" ? root.colorFor(root.category) : Color.muted
             inkColor: Color.popups.text
@@ -746,12 +828,13 @@ Panel {
           spacing: Style.space(8)
 
           PanelSectionHeader {
-            text: root.rawTaf !== "" ? "TAF ISSUED " + root.clock(root.tafIssuedMs) : "TERMINAL FORECAST"
+            text: root.safe(root.rawTaf, 900) !== "" ? "TAF ISSUED " + root.clock(root.tafIssuedMs) : "TERMINAL FORECAST"
             foreground: Color.popups.text
             font.letterSpacing: Style.space(2)
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.tafPeriodList.length === 0
             width: parent.width
             text: root.tafFor === root.stationId
@@ -780,6 +863,7 @@ Panel {
 
           // The one line a pilot actually scans a TAF for.
           Text {
+            textFormat: Text.PlainText
             visible: root.deterioration !== null
             width: parent.width
             text: root.deterioration
@@ -815,6 +899,7 @@ Panel {
                   width: pr.width - Style.space(14)
                   spacing: Style.space(1)
                   Text {
+                    textFormat: Text.PlainText
                     text: root.dayClock(pr.modelData.from) + "  "
                           + (pr.modelData.transient
                              ? (pr.modelData.probability ? "PROB" + pr.modelData.probability : "TEMPO")
@@ -824,6 +909,7 @@ Panel {
                     font.pixelSize: Style.space(12)
                   }
                   Text {
+                    textFormat: Text.PlainText
                     width: parent.width
                     text: root.periodSummary(pr.modelData)
                     color: Color.muted
@@ -850,6 +936,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.nearby.length <= 1
             width: parent.width
             text: root.wantedStation !== ""
@@ -879,14 +966,16 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
               }
               Text {
+                textFormat: Text.PlainText
                 width: Style.space(46)
-                text: String(nr.modelData.icaoId || "")
+                text: root.safe(nr.modelData.icaoId, 6)
                 color: nr.modelData.icaoId === root.stationId ? Color.accent : Color.popups.text
                 font.family: Style.font.family
                 font.pixelSize: Style.space(12)
                 font.bold: nr.modelData.icaoId === root.stationId
               }
               Text {
+                textFormat: Text.PlainText
                 width: Style.space(52)
                 text: nr.modelData._nm !== undefined ? (Math.round(nr.modelData._nm) + " nm") : ""
                 color: Color.muted
@@ -895,8 +984,9 @@ Panel {
                 horizontalAlignment: Text.AlignRight
               }
               Text {
+                textFormat: Text.PlainText
                 width: nr.width - Style.space(120)
-                text: String(nr.modelData.name || "")
+                text: root.safe(nr.modelData.name, 40)
                 color: Color.muted
                 font.family: Style.font.family
                 font.pixelSize: Style.space(11)
@@ -918,6 +1008,7 @@ Panel {
             font.letterSpacing: Style.space(2)
           }
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             text: root.obs ? String(root.obs.rawOb || "") : "—"
             color: Color.popups.text
@@ -933,9 +1024,10 @@ Panel {
             font.letterSpacing: Style.space(2)
           }
           Text {
+            textFormat: Text.PlainText
             visible: root.rawTaf !== ""
             width: parent.width
-            text: root.rawTaf
+            text: root.safe(root.rawTaf, 900)
             color: Color.popups.text
             font.family: Style.font.family
             font.pixelSize: Style.space(11)
@@ -970,6 +1062,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   id: linkText
                   anchors.left: parent.left
                   anchors.leftMargin: Style.space(4)
@@ -994,6 +1087,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             width: parent.width
             text: "Source: NOAA / NWS Aviation Weather Center. For situational awareness only — not for flight planning."
             color: Color.muted
@@ -1016,6 +1110,7 @@ Panel {
     spacing: Style.space(8)
 
     Text {
+      textFormat: Text.PlainText
       width: Style.space(150)
       text: sr.label
       color: Color.muted
@@ -1024,6 +1119,7 @@ Panel {
       elide: Text.ElideRight
     }
     Text {
+      textFormat: Text.PlainText
       width: Style.space(104)
       text: sr.value
       color: sr.highlight ? Color.accent : Color.popups.text
@@ -1032,6 +1128,7 @@ Panel {
       font.bold: sr.highlight
     }
     Text {
+      textFormat: Text.PlainText
       width: Math.max(Style.space(20), sr.width - Style.space(150 + 104 + 16))
       text: sr.note
       color: Color.muted
