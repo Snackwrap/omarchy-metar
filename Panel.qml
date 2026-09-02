@@ -42,7 +42,7 @@ Panel {
   readonly property string glyph: "\uf072"
 
   readonly property string api: "https://aviationweather.gov/api/data/"
-  readonly property string ua: "omarchy-metar/0.1"
+  readonly property string ua: "omarchy-metar/0.2"
 
   // ---- Settings ---------------------------------------------------------
   function boolSetting(name, dflt) { var v = setting(name, dflt); return v === true || v === "true" || v === 1 }
@@ -55,6 +55,9 @@ Panel {
     return (isFinite(v) && v > 0 && v <= 360) ? v : -1
   }
   readonly property string alertCategory: String(setting("alertCategory", "off"))
+  // One switch for every flourish: the barb's turn and gust sway, the forecast
+  // wipe, and the colour fades. Off leaves the panel completely still.
+  readonly property bool animOn: boolSetting("animations", true)
 
   // ---- Location ---------------------------------------------------------
   // Inherited from the built-in weather widget, which stores whatever the user
@@ -226,6 +229,28 @@ Panel {
   }
 
   // ---- Networking -------------------------------------------------------
+  // Station identifiers are ours or the API's, but the URL still gets built
+  // from remote data, so it goes to Qt.openUrlExternally behind a scheme check
+  // rather than through a shell.
+  function openLink(u) {
+    var t = String(u || "")
+    if (t.indexOf("https://") !== 0) return
+    Qt.openUrlExternally(t)
+  }
+
+  readonly property var resources: {
+    var id = stationId
+    if (id === "") return []
+    return [
+      { label: "Full report at the Aviation Weather Center",
+        url: "https://aviationweather.gov/data/metar/?id=" + id + "&taf=true" },
+      { label: "Graphical forecast for the area",
+        url: "https://aviationweather.gov/gfa/" },
+      { label: id + " on SkyVector",
+        url: "https://skyvector.com/airport/" + id }
+    ]
+  }
+
   // The bar routes shell.summon/toggle to the widget, which forwards to this
   // name — without it the pill still opens on a click but IPC does nothing.
   function openFromHotkey() { open() }
@@ -268,7 +293,21 @@ Panel {
   Timer { interval: 1000; running: true; repeat: true; onTriggered: root.nowMs = Date.now() }
 
   // Opening the panel is a good moment to be current.
-  onOpenedChanged: if (opened) refresh()
+  onOpenedChanged: {
+    if (!opened) return
+    refresh()
+    Qt.callLater(playForView)
+  }
+
+  function playForecast() { if (timeline) timeline.play() }
+  function playNow() { if (skyProfile) skyProfile.play() }
+  function playForView() {
+    if (view === "forecast") playForecast()
+    else if (view === "now") playNow()
+  }
+  onViewChanged: if (opened) Qt.callLater(playForView)
+  onTafPeriodListChanged: if (view === "forecast" && opened) Qt.callLater(playForecast)
+  onObsChanged: if (view === "now" && opened) Qt.callLater(playNow)
 
   function applyObs(list) {
     if (!list || !list.length) { lastError = "no observation"; return }
@@ -484,6 +523,12 @@ Panel {
               font.pixelSize: Style.space(26)
               font.bold: true
               anchors.bottom: parent.bottom
+              // Conditions change between categories, not to them, so the
+              // colour crosses rather than cuts.
+              Behavior on color {
+                enabled: root.animOn
+                ColorAnimation { duration: 450; easing.type: Easing.InOutQuad }
+              }
             }
             Text {
               text: root.category !== "" ? Met.categoryName(root.category) : (root.lastError !== "" ? root.lastError : "loading")
@@ -552,16 +597,19 @@ Panel {
             spacing: Style.space(12)
 
             WindBarb {
-              width: Style.space(72)
-              height: Style.space(72)
+              width: Style.space(76)
+              height: Style.space(76)
               direction: root.windDir
               speedKt: root.windKt
+              gustKt: root.gustKt
               stroke: Color.popups.text
+              roseColor: Color.muted
+              animate: root.animOn
               anchors.verticalCenter: parent.verticalCenter
             }
 
             Column {
-              width: parent.width - Style.space(84)
+              width: parent.width - Style.space(88)
               spacing: Style.space(3)
               anchors.verticalCenter: parent.verticalCenter
 
@@ -591,6 +639,20 @@ Panel {
                 wrapMode: Text.WordWrap
               }
             }
+
+          }
+
+          SkyProfile {
+            id: skyProfile
+            width: parent.width
+            height: Style.space(126)
+            clouds: root.obs ? (root.obs.clouds || []) : []
+            ceiling: root.ceilFt
+            ceilingColor: root.category !== "" ? root.colorFor(root.category) : Color.muted
+            inkColor: Color.popups.text
+            fontFamily: Style.font.family
+            labelSize: Style.space(10)
+            animate: root.animOn
           }
 
           PanelSeparator { foreground: Color.popups.text }
@@ -631,27 +693,6 @@ Panel {
                 ? "field " + Math.round(Number(root.obs.elev) * 3.28084).toLocaleString() + " ft" : ""
             }
 
-            // Sky gets a full-width row of its own: three or four layers do not
-            // fit the note column, and truncating them loses the ceiling.
-            Row {
-              width: parent.width
-              spacing: Style.space(8)
-              Text {
-                width: Style.space(150)
-                text: "Sky"
-                color: Color.muted
-                font.family: Style.font.family
-                font.pixelSize: Style.space(13)
-              }
-              Text {
-                width: parent.width - Style.space(158)
-                text: root.skyText()
-                color: Color.popups.text
-                font.family: Style.font.family
-                font.pixelSize: Style.space(13)
-                wrapMode: Text.WordWrap
-              }
-            }
           }
         }
 
@@ -680,8 +721,10 @@ Panel {
           }
 
           TafTimeline {
+            id: timeline
             visible: root.tafPeriodList.length > 0
             width: parent.width
+            animate: root.animOn
             periods: root.tafPeriodList
             nowMs: root.nowMs
             categoryColor: root.colorFor
@@ -854,6 +897,57 @@ Panel {
             font.family: Style.font.family
             font.pixelSize: Style.space(11)
             wrapMode: Text.WrapAnywhere
+          }
+
+          PanelSectionHeader {
+            visible: root.resources.length > 0
+            text: "GO DEEPER"
+            foreground: Color.popups.text
+            font.letterSpacing: Style.space(2)
+          }
+
+          // A bar pill is the wrong place to plan a flight from, so the honest
+          // move is to hand the reader straight to the places that are right.
+          Column {
+            width: parent.width
+            spacing: Style.space(2)
+
+            Repeater {
+              model: root.resources
+              Rectangle {
+                id: linkRow
+                required property var modelData
+                width: parent ? parent.width : 0
+                height: linkText.implicitHeight + Style.space(6)
+                radius: Style.space(4)
+                color: linkArea.containsMouse ? Qt.rgba(1, 1, 1, 0.06) : "transparent"
+                Behavior on color {
+                  enabled: root.animOn
+                  ColorAnimation { duration: 130 }
+                }
+
+                Text {
+                  id: linkText
+                  anchors.left: parent.left
+                  anchors.leftMargin: Style.space(4)
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: parent.width - Style.space(8)
+                  text: "\u2197  " + linkRow.modelData.label
+                  color: linkArea.containsMouse ? Color.accent : Color.popups.text
+                  font.family: Style.font.family
+                  font.pixelSize: Style.space(12)
+                  elide: Text.ElideRight
+                }
+
+                MouseArea {
+                  id: linkArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.openLink(linkRow.modelData.url)
+                }
+              }
+            }
           }
 
           Text {

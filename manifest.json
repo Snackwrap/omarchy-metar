@@ -2,14 +2,28 @@
   "schemaVersion": 1,
   "id": "com.leafbox.metar",
   "name": "Aviation Weather",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Robert (leafbox)",
   "license": "MIT",
   "homepage": "https://github.com/Snackwrap/omarchy-metar",
   "repository": "https://github.com/Snackwrap/omarchy-metar",
   "description": "METAR and TAF in the Omarchy bar: the flight category at your nearest airfield as a colored pill, the current observation decoded into plain English with a drawn wind barb and sky profile, the terminal forecast as a category timeline, neighbouring fields, and the raw reports.",
-  "keywords": ["metar", "taf", "aviation", "weather", "aviation weather", "flying", "pilot", "vfr", "ifr", "bar", "quickshell"],
-  "kinds": ["bar-widget"],
+  "keywords": [
+    "metar",
+    "taf",
+    "aviation",
+    "weather",
+    "aviation weather",
+    "flying",
+    "pilot",
+    "vfr",
+    "ifr",
+    "bar",
+    "quickshell"
+  ],
+  "kinds": [
+    "bar-widget"
+  ],
   "entryPoints": {
     "barWidget": "BarWidget.qml"
   },
@@ -17,7 +31,14 @@
     "displayName": "Aviation Weather",
     "description": "Flight-category pill for an airfield, with the decoded METAR, the TAF timeline and nearby stations.",
     "category": "Info",
-    "aliases": ["metar", "taf", "aviation", "aviation weather", "flying", "airport weather"],
+    "aliases": [
+      "metar",
+      "taf",
+      "aviation",
+      "aviation weather",
+      "flying",
+      "airport weather"
+    ],
     "allowMultiple": true,
     "defaultSection": "right",
     "defaults": {
@@ -30,7 +51,8 @@
       "defaultTab": "now",
       "runwayHeading": "",
       "alertCategory": "off",
-      "popupPosition": "icon"
+      "popupPosition": "icon",
+      "animations": true
     },
     "schema": [
       {
@@ -56,10 +78,22 @@
         "type": "enum",
         "label": "Bar pill shows",
         "options": [
-          { "value": "category", "label": "Flight category" },
-          { "value": "station", "label": "Station identifier" },
-          { "value": "both", "label": "Both" },
-          { "value": "wind", "label": "Wind" }
+          {
+            "value": "category",
+            "label": "Flight category"
+          },
+          {
+            "value": "station",
+            "label": "Station identifier"
+          },
+          {
+            "value": "both",
+            "label": "Both"
+          },
+          {
+            "value": "wind",
+            "label": "Wind"
+          }
         ],
         "defaultValue": "category"
       },
@@ -68,8 +102,14 @@
         "type": "enum",
         "label": "Times shown as",
         "options": [
-          { "value": "local", "label": "Local time" },
-          { "value": "zulu", "label": "Zulu (UTC)" }
+          {
+            "value": "local",
+            "label": "Local time"
+          },
+          {
+            "value": "zulu",
+            "label": "Zulu (UTC)"
+          }
         ],
         "defaultValue": "local"
       },
@@ -78,8 +118,14 @@
         "type": "enum",
         "label": "Temperature",
         "options": [
-          { "value": "C", "label": "Celsius" },
-          { "value": "F", "label": "Fahrenheit" }
+          {
+            "value": "C",
+            "label": "Celsius"
+          },
+          {
+            "value": "F",
+            "label": "Fahrenheit"
+          }
         ],
         "defaultValue": "C"
       },
@@ -88,10 +134,22 @@
         "type": "enum",
         "label": "Default tab",
         "options": [
-          { "value": "now", "label": "Now" },
-          { "value": "forecast", "label": "Forecast" },
-          { "value": "nearby", "label": "Nearby" },
-          { "value": "raw", "label": "Raw" }
+          {
+            "value": "now",
+            "label": "Now"
+          },
+          {
+            "value": "forecast",
+            "label": "Forecast"
+          },
+          {
+            "value": "nearby",
+            "label": "Nearby"
+          },
+          {
+            "value": "raw",
+            "label": "Raw"
+          }
         ],
         "defaultValue": "now"
       },
@@ -106,20 +164,44 @@
         "type": "enum",
         "label": "Notify when conditions drop to",
         "options": [
-          { "value": "off", "label": "Never" },
-          { "value": "MVFR", "label": "MVFR or worse" },
-          { "value": "IFR", "label": "IFR or worse" },
-          { "value": "LIFR", "label": "LIFR" }
+          {
+            "value": "off",
+            "label": "Never"
+          },
+          {
+            "value": "MVFR",
+            "label": "MVFR or worse"
+          },
+          {
+            "value": "IFR",
+            "label": "IFR or worse"
+          },
+          {
+            "value": "LIFR",
+            "label": "LIFR"
+          }
         ],
         "defaultValue": "off"
+      },
+      {
+        "key": "animations",
+        "type": "boolean",
+        "label": "Animate the wind barb and the forecast strip",
+        "defaultValue": true
       },
       {
         "key": "popupPosition",
         "type": "enum",
         "label": "Popup position",
         "options": [
-          { "value": "icon", "label": "Under the bar icon" },
-          { "value": "center", "label": "Centered on the bar" }
+          {
+            "value": "icon",
+            "label": "Under the bar icon"
+          },
+          {
+            "value": "center",
+            "label": "Centered on the bar"
+          }
         ],
         "defaultValue": "icon"
       }

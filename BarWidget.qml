@@ -62,12 +62,27 @@ BarWidget {
     }
   }
 
+  // BarIconButton is a *fixed-width* slot sized for a single glyph, and the
+  // glyph inside it is drawn centred with no clipping — so a pill carrying text
+  // as well ("\uf072 MVFR") silently overhangs its neighbours on both sides.
+  // Measure the actual string and widen the slot to match.
+  TextMetrics {
+    id: pillMetrics
+    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+    font.pixelSize: Style.bar.iconFont
+    text: button.text
+  }
+
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
     text: panelLoader.item ? panelLoader.item.label : ""
-    slotSize: Style.bar.statusSlot
+    slotSize: Math.max(Style.bar.statusSlot,
+                       Math.ceil(pillMetrics.width) + Style.space(9))
+    // The glyph canvas has to grow with the slot too, or the text is centred
+    // inside a 16px box in the middle of a much wider button.
+    opticalSize: slotSize
     tooltipText: panelLoader.item ? panelLoader.item.tooltip : "Aviation Weather"
     // The pill carries the flight category as colour, which is the whole point
     // of it: green through magenta is the same scale every aviation chart uses,

@@ -18,6 +18,26 @@ Item {
   property string fontFamily: "monospace"
   property real labelSize: 10
   property bool zulu: false
+  property bool animate: true
+
+  // The strip is revealed left to right when the tab opens, which reads as the
+  // forecast being laid down along its own time axis. One wipe over the whole
+  // strip rather than per-block animations: the blocks are a continuous run of
+  // time and animating them separately breaks that.
+  property real reveal: 1.0
+  function play() {
+    if (!animate) { reveal = 1.0; return }
+    reveal = 0
+    wipe.restart()
+  }
+  NumberAnimation {
+    id: wipe
+    target: root
+    property: "reveal"
+    to: 1.0
+    duration: 620
+    easing.type: Easing.OutCubic
+  }
 
   readonly property var solid: periods.filter(function (p) { return !p.transient })
   readonly property var transient_: periods.filter(function (p) { return p.transient })
@@ -38,23 +58,33 @@ Item {
     width: parent.width
     height: 26
 
-    Repeater {
-      model: root.solid
-      Rectangle {
-        x: root.xFor(modelData.from)
-        width: Math.max(1, root.xFor(modelData.to) - root.xFor(modelData.from))
-        height: parent.height
-        color: root.categoryColor(modelData.category)
-        // Hairline gaps between blocks so adjacent periods of the same
-        // category still read as two forecast groups, not one.
-        border.width: 1
-        border.color: Qt.rgba(0, 0, 0, 0.35)
+    // The reveal happens by clipping this layer, so the blocks keep their real
+    // positions and only the visible extent grows.
+    Item {
+      width: parent.width * root.reveal
+      height: parent.height
+      clip: true
+
+      Repeater {
+        model: root.solid
+        Rectangle {
+          x: root.xFor(modelData.from)
+          width: Math.max(1, root.xFor(modelData.to) - root.xFor(modelData.from))
+          height: parent.height
+          color: root.categoryColor(modelData.category)
+          // Hairline gaps between blocks so adjacent periods of the same
+          // category still read as two forecast groups, not one.
+          border.width: 1
+          border.color: Qt.rgba(0, 0, 0, 0.35)
+        }
       }
     }
 
-    // Now marker, only while it is actually inside the forecast window.
+    // Now marker, only while it is actually inside the forecast window — and
+    // outside the clip layer, since it overhangs the strip top and bottom.
     Rectangle {
       visible: root.nowMs >= root.fromMs && root.nowMs <= root.toMs
+               && root.xFor(root.nowMs) <= root.width * root.reveal
       x: root.xFor(root.nowMs) - 1
       width: 2
       height: parent.height + 5
@@ -71,14 +101,19 @@ Item {
     width: parent.width
     height: root.transient_.length ? 6 : 0
 
-    Repeater {
-      model: root.transient_
-      Rectangle {
-        x: root.xFor(modelData.from)
-        width: Math.max(2, root.xFor(modelData.to) - root.xFor(modelData.from))
-        height: parent.height
-        color: root.categoryColor(modelData.category)
-        opacity: 0.55
+    Item {
+      width: parent.width * root.reveal
+      height: parent.height
+      clip: true
+      Repeater {
+        model: root.transient_
+        Rectangle {
+          x: root.xFor(modelData.from)
+          width: Math.max(2, root.xFor(modelData.to) - root.xFor(modelData.from))
+          height: parent.height
+          color: root.categoryColor(modelData.category)
+          opacity: 0.55
+        }
       }
     }
   }

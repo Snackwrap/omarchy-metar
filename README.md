@@ -13,9 +13,10 @@ weather widget already knows.
 ## The four tabs
 
 - **Now** — the current observation: wind drawn as a proper station-model barb
-  beside the wind in words, visibility, ceiling, the sky layers, temperature and
-  dewpoint with relative humidity, altimeter in both inches and hectopascals,
-  and the density altitude.
+  inside a compass rose, the sky drawn to height with the ceiling marked in the
+  category colour, then visibility, ceiling, temperature and dewpoint with
+  relative humidity, altimeter in both inches and hectopascals, and the density
+  altitude.
 - **Forecast** — the TAF as one strip, time running left to right, each block
   coloured by the category it forecasts, with a marker for now. Below it, the
   line a pilot actually scans a TAF for: when it deteriorates, and to what.
@@ -23,7 +24,8 @@ weather widget already knows.
   with its own category. Useful when your home field is IFR and you want to know
   how far the murk extends.
 - **Raw** — the METAR and TAF exactly as issued, for when you would rather read
-  them yourself.
+  them yourself, and links straight out to the full report at the Aviation
+  Weather Center, the graphical area forecast, and the field on SkyVector.
 
 ## Flight categories
 
@@ -94,6 +96,7 @@ station ""` goes back to picking the nearest field automatically.
 | Default tab | `defaultTab` | `now`, `forecast`, `nearby` or `raw` |
 | Runway heading | `runwayHeading` | e.g. `280`, to show the crosswind component. Blank hides it |
 | Notify when it drops to | `alertCategory` | `off`, `MVFR`, `IFR` or `LIFR` |
+| Animations | `animations` | The barb's turn and gust sway, and the drawing-in of the strip and sky |
 | Popup position | `popupPosition` | `icon` (under the bar icon) or `center` |
 
 Naming a station explicitly turns off the Nearby tab, since neighbours are found
@@ -118,7 +121,14 @@ by searching around your location rather than around the station.
   in, wind barbs, weather codes, density altitude, TAF periods. Deliberately
   free of Qt types so it can be tested under node.
 - `WindBarb.qml` — the station-model barb on a `Canvas`. A pennant is 50 kt, a
-  full barb 10, a half barb 5, and under 3 kt it is the open calm circle.
+  full barb 10, a half barb 5, and under 3 kt it is the open calm circle. The
+  rose behind it is not decoration: a barb with no reference frame is a stick at
+  an arbitrary angle.
+- `SkyProfile.qml` — the reported layers drawn at their real heights, dash
+  density and ink carrying the coverage, ceiling ruled in the category colour.
+  The height axis is square-root compressed and its top follows the highest
+  layer, because a scale fixed at twelve thousand feet squashes a low overcast
+  day into the bottom two pixels.
 - `TafTimeline.qml` — the forecast strip. TEMPO and PROB groups describe a
   temporary deviation inside another period rather than a period of their own,
   so they are drawn as a thin band underneath; letting a thirty-minute TEMPO
@@ -128,6 +138,21 @@ Observations are refetched every ten minutes, and whenever the popup is opened.
 Reports are issued about hourly, with unscheduled specials in between, so that
 keeps the pill honest without hammering a public service. Anything older than 75
 minutes is called out as stale rather than presented as current.
+
+## Movement
+
+Three things move, and each of them is showing you something:
+
+- **The barb turns** to a new wind rather than jumping, taking the short way
+  round — a wind backing from 350 to 010 is a twenty degree shift, not a three
+  hundred and forty degree spin.
+- **The barb sways** when the wind is gusting, by an amount proportional to the
+  spread between the lull and the peak. Steady wind, still barb.
+- **The forecast strip and the sky draw in** when you open the tab, left to
+  right along their own axes.
+
+All three are one switch: `omarchy bar set com.leafbox.metar animations false`
+leaves the panel completely still.
 
 ## Data and disclaimer
 
