@@ -129,6 +129,7 @@ Item {
     Repeater {
       model: root.tickTimes()
       Text {
+        textFormat: Text.PlainText
         x: Math.min(root.width - implicitWidth, Math.max(0, root.xFor(modelData) - implicitWidth / 2))
         text: root.tickLabel(modelData)
         color: root.labelColor

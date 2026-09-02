@@ -156,6 +156,7 @@ Item {
   }
 
   Text {
+    textFormat: Text.PlainText
     anchors.left: parent.left
     anchors.top: parent.top
     text: root.ceiling === null ? "SKY  ·  no ceiling" : "SKY"
@@ -185,6 +186,7 @@ Item {
   Repeater {
     model: root.layers
     Text {
+      textFormat: Text.PlainText
       required property var modelData
       required property int index
       x: root.plotWidth + 7
@@ -198,6 +200,7 @@ Item {
   }
 
   Text {
+    textFormat: Text.PlainText
     x: root.plotWidth + 7
     y: root.floorY - root.labelSize / 2
     text: "field"
@@ -208,6 +211,7 @@ Item {
   }
 
   Text {
+    textFormat: Text.PlainText
     visible: root.layers.length === 0
     x: 0
     y: root.floorY - (root.floorY - root.skyY) * 0.5

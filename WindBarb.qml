@@ -209,6 +209,7 @@ Item {
 
   // Variable winds get a label, since the staff direction is meaningless.
   Text {
+    textFormat: Text.PlainText
     visible: root.variable && !root.calm
     text: "VRB"
     color: root.stroke

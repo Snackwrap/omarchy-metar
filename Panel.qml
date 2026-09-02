@@ -47,7 +47,10 @@ Panel {
 
   // ---- Settings ---------------------------------------------------------
   function boolSetting(name, dflt) { var v = setting(name, dflt); return v === true || v === "true" || v === 1 }
-  readonly property string wantedStation: String(setting("station", "")).toUpperCase().replace(/[^A-Z0-9]/g, "")
+  // Becomes part of a request URL, so it is held to the shape and length an
+  // ICAO identifier actually has rather than trusted to be one.
+  readonly property string wantedStation:
+    String(setting("station", "")).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6)
   readonly property bool zulu: String(setting("timeFormat", "local")) === "zulu"
   readonly property bool fahrenheit: String(setting("temperature", "C")) === "F"
   readonly property string pillContent: String(setting("pillContent", "category"))
@@ -75,31 +78,52 @@ Panel {
   property double geocodedLat: NaN
   property double geocodedLon: NaN
 
+  // The location file is small and predictable, but it is still a path anything
+  // can write. FileView has no size cap and no regular-file check, and calling
+  // text() on a planted FIFO would block a long-lived shell forever, so it is
+  // kept purely as a watcher and the read goes through a reader that is bounded
+  // in both directions: `head -c` caps the bytes, `timeout` caps the wait.
+  readonly property string weatherPath:
+    Quickshell.env("HOME") + "/.local/state/omarchy/settings/weather.json"
+
   FileView {
     id: weatherFile
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/settings/weather.json"
+    path: root.weatherPath
     watchChanges: true
+    preload: false
     printErrors: false
-    onFileChanged: reload()
-    onLoaded: {
-      try {
-        var raw = String(text() || "")
-        if (raw.length > 8192) return
-        var d = JSON.parse(raw)
-        root.weatherLocation = {
-          name: typeof d.name === "string" ? d.name.slice(0, 80) : "",
-          latitude: parseFloat(d.latitude),
-          longitude: parseFloat(d.longitude)
-        }
-      } catch (e) { /* leave the fallback in place */ }
-    }
-    onLoadFailed: root.weatherLocation = ({ name: "", latitude: null, longitude: null })
+    onFileChanged: weatherReadTimer.restart()
   }
 
-  // The first read can race shell startup, the same way the weather widget's does.
-  Timer { interval: 1500; running: true; onTriggered: weatherFile.reload() }
+  // Coalesce bursts of writes into one read.
+  Timer { id: weatherReadTimer; interval: 250; onTriggered: weatherReader.running = true }
 
-  readonly property string weatherName: String(weatherLocation.name || "").replace(/^\s+|\s+$/g, "")
+  // The first read can race shell startup, the same way the weather widget's does.
+  Timer { interval: 1500; running: true; onTriggered: weatherReader.running = true }
+
+  Process {
+    id: weatherReader
+    command: ["timeout", "2", "head", "-c", "8192", "--", root.weatherPath]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var raw = String(text || "")
+        if (raw.length === 0 || raw.length > 8192) return
+        try {
+          var d = JSON.parse(raw)
+          root.weatherLocation = {
+            name: typeof d.name === "string" ? root.safe(d.name, 80) : "",
+            latitude: parseFloat(d.latitude),
+            longitude: parseFloat(d.longitude)
+          }
+        } catch (e) { /* leave the fallback in place */ }
+      }
+    }
+  }
+
+  // Also becomes part of a request URL.
+  readonly property string weatherName:
+    String(weatherLocation.name || "").replace(/^\s+|\s+$/g, "").slice(0, 80)
   readonly property double ownLat: parseFloat(String(setting("latitude", "")))
   readonly property double ownLon: parseFloat(String(setting("longitude", "")))
   readonly property bool hasOwnCoords: isFinite(ownLat) && isFinite(ownLon) &&
@@ -198,8 +222,8 @@ Panel {
   // ---- Bar pill ---------------------------------------------------------
   readonly property string label: {
     if (!obs) return glyph
-    if (pillContent === "station") return glyph + "  " + stationId
-    if (pillContent === "both") return glyph + "  " + stationId + " " + category
+    if (pillContent === "station") return glyph + "  " + safeBare(stationId, 6)
+    if (pillContent === "both") return glyph + "  " + safeBare(stationId, 6) + " " + category
     if (pillContent === "wind") {
       if (!isFinite(windKt) || windKt === 0) return glyph + "  calm"
       return glyph + "  " + (isFinite(windDir) && windDir > 0 ? Met.cardinal(windDir) : "VRB")
@@ -294,6 +318,13 @@ Panel {
   // it looks like markup. Every remote value is therefore forced through here:
   // control characters out, length clamped, and the Text elements that show
   // them are pinned to PlainText besides.
+  // For the bar pill and its tooltip: those render in Text elements the shell
+  // owns, so `textFormat` is not ours to set and the markup has to come out of
+  // the string instead of being neutralised at the sink.
+  function safeBare(v, limit) {
+    return safe(v, limit).replace(/[<>&]/g, " ")
+  }
+
   function safe(v, limit) {
     var text = String(v === null || v === undefined ? "" : v)
     text = text.replace(/[\u0000-\u001F\u007F]+/g, " ").replace(/^\s+|\s+$/g, "")
@@ -308,10 +339,32 @@ Panel {
     return v.length > cap ? v.slice(0, cap) : v
   }
 
+  // Every request is stamped with the generation and the station it was made
+  // for, and a completion whose stamp no longer matches is discarded. Without
+  // this a forecast that was in flight when the station changed would be
+  // accepted and then marked as belonging to the *new* airfield — stale data
+  // wearing the right label, which is worse than no data.
+  property int fetchGen: 0
+  property int stationGen: -1
+  property int boxGen: -1
+  property int tafGen: -1
+  property string tafRequestedFor: ""
+
+  function invalidate() {
+    fetchGen += 1
+    // Reap anything still in flight for the previous generation rather than
+    // letting it land late.
+    if (stationProc.running) stationProc.running = false
+    if (boxProc.running) boxProc.running = false
+    if (tafProc.running) tafProc.running = false
+    loading = false
+  }
+
   function refresh() {
     if (loading) return
     if (wantedStation !== "") {
       loading = true
+      stationGen = fetchGen
       stationProc.command = curlTo(api + "metar?ids=" + wantedStation + "&format=json", 15)
       stationProc.running = true
       return
@@ -319,12 +372,22 @@ Panel {
     var box = bboxString()
     if (box === "") return          // no location resolved yet; onHasSiteChanged retries
     loading = true
+    boxGen = fetchGen
     boxProc.command = curlTo(api + "metar?bbox=" + box + "&format=json", 20)
     boxProc.running = true
   }
 
   function fetchTaf() {
-    if (stationId === "" || tafProc.running) return
+    if (stationId === "") return
+    // A forecast already in flight for a different station is superseded, not
+    // a reason to skip: the previous behaviour refused the new request and then
+    // stamped the old answer with the new station's id.
+    if (tafProc.running) {
+      if (tafRequestedFor === stationId) return
+      tafProc.running = false
+    }
+    tafGen = fetchGen
+    tafRequestedFor = stationId
     tafProc.command = curlTo(api + "taf?ids=" + stationId + "&format=json", 15)
     tafProc.running = true
   }
@@ -333,7 +396,9 @@ Panel {
 
   // Refetch when the resolved location or the named station changes.
   onHasSiteChanged: if (hasSite && !obs) refresh()
-  onWantedStationChanged: { obs = null; tafFor = ""; refresh() }
+  onWantedStationChanged: { invalidate(); obs = null; tafFor = ""; tafPeriodList = []; rawTaf = ""; refresh() }
+  onSiteLatChanged: if (wantedStation === "") invalidate()
+  onSiteLonChanged: if (wantedStation === "") invalidate()
 
   // Observations are issued about hourly, with unscheduled specials in
   // between, so ten minutes keeps the pill honest without hammering a public
@@ -446,6 +511,7 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (root.stationGen !== root.fetchGen) return      // superseded
         try {
           root.applyObs(root.parseBounded(text))
         } catch (e) { root.lastError = "could not read the observation" }
@@ -474,6 +540,7 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (root.boxGen !== root.fetchGen) return          // superseded
         try {
           var list = root.parseBounded(text)
           if (!list || !list.length) { root.lastError = "no station reporting nearby"; return }
@@ -489,6 +556,10 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        // The forecast belongs to the station it was requested for, never to
+        // whichever station happens to be selected when it lands.
+        var forStation = root.tafRequestedFor
+        if (root.tafGen !== root.fetchGen || forStation !== root.stationId) return
         try {
           var arr = root.parseBounded(text)
           if (!arr || !arr.length) {
@@ -496,14 +567,14 @@ Panel {
             // and the tab says so rather than looking broken.
             root.tafPeriodList = []
             root.rawTaf = ""
-            root.tafFor = root.stationId
+            root.tafFor = forStation
             return
           }
           var t = arr[0]
           root.rawTaf = String(t.rawTAF || "")
           root.tafIssuedMs = Number(t.issueTime ? Date.parse(t.issueTime) : 0)
           root.tafPeriodList = Met.tafPeriods(root.boundedList(t.fcsts, 48))
-          root.tafFor = root.stationId
+          root.tafFor = forStation
         } catch (e) { root.tafPeriodList = []; root.rawTaf = "" }
       }
     }
