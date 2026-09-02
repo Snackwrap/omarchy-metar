@@ -214,7 +214,12 @@ Panel {
   readonly property string category: {
     if (!obs) return ""
     var c = Met.flightCategory(visSM, ceilFt)
-    return c !== "" ? c : String(obs.fltCat || "")
+    if (c !== "") return c
+    // Falling back to the endpoint's own verdict is fine; taking its word for
+    // what the *string* is, is not. There are exactly four categories.
+    var theirs = String(obs.fltCat || "").toUpperCase()
+    return (theirs === "VFR" || theirs === "MVFR" || theirs === "IFR" || theirs === "LIFR")
+      ? theirs : ""
   }
   readonly property double observedMs: obs ? Number(obs.obsTime) * 1000 : NaN
   readonly property double ageMin: obs ? Met.ageMinutes(observedMs, nowMs) : NaN
@@ -245,7 +250,9 @@ Panel {
   readonly property string categoryColor: category !== "" && !stale ? colorFor(category) : ""
 
   // ---- Bar pill ---------------------------------------------------------
-  readonly property string label: {
+  readonly property string label: safeBare(rawLabel, 48)
+
+  readonly property string rawLabel: {
     if (!obs) return glyph
     if (pillContent === "station") return glyph + "  " + safeBare(stationId, 6)
     if (pillContent === "both") return glyph + "  " + safeBare(stationId, 6) + " " + category
@@ -257,7 +264,12 @@ Panel {
     return glyph + "  " + category
   }
 
-  readonly property string tooltip: {
+  // Both of these render in Text elements the shell owns, where this plugin
+  // cannot set textFormat — so the boundary is applied to the finished string
+  // rather than trusting that every piece was clean on the way in.
+  readonly property string tooltip: safeBareLines(rawTooltip, 80, 8)
+
+  readonly property string rawTooltip: {
     if (lastError !== "") return "Aviation weather — " + lastError
     if (!obs) return "Aviation weather — loading"
     var parts = [stationId + (stationName !== "" ? " · " + stationName : "")]
@@ -349,13 +361,28 @@ Panel {
   // For the bar pill and its tooltip: those render in Text elements the shell
   // owns, so `textFormat` is not ours to set and the markup has to come out of
   // the string instead of being neutralised at the sink.
+  // A tooltip is deliberately several lines, and safe() strips newlines along
+  // with every other C0 control — so the boundary is applied per line and the
+  // structure is rebuilt, rather than the whole thing being flattened.
+  function safeBareLines(v, perLine, maxLines) {
+    var lines = String(v === null || v === undefined ? "" : v).split("\n")
+    var out = []
+    for (var i = 0; i < lines.length && out.length < (maxLines || 12); i++) {
+      out.push(safeBare(lines[i], perLine || 80))
+    }
+    return out.join("\n")
+  }
+
   function safeBare(v, limit) {
     return safe(v, limit).replace(/[<>&]/g, " ")
   }
 
   function safe(v, limit) {
     var text = String(v === null || v === undefined ? "" : v)
-    text = text.replace(/[\u0000-\u001F\u007F]+/g, " ").replace(/^\s+|\s+$/g, "")
+    text = text.replace(/[\u0000-\u001F\u007F\u0080-\u009F]+/g, " ")
+                   // Bidi and other invisible format controls can reorder or
+                   // hide what is shown without changing what was checked.
+                   .replace(/[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g, "").replace(/^\s+|\s+$/g, "")
     var cap = limit || maxFieldChars
     return text.length > cap ? text.slice(0, cap) + "\u2026" : text
   }
