@@ -101,9 +101,25 @@ Panel {
   // The first read can race shell startup, the same way the weather widget's does.
   Timer { interval: 1500; running: true; onTriggered: weatherReader.running = true }
 
+  // Opening with O_NOFOLLOW and O_NONBLOCK means a symlink cannot redirect the
+  // read and a planted FIFO cannot block it, and every check below is made
+  // through that same descriptor rather than on the path, so there is no window
+  // between the check and the read. perl rather than python because Omarchy
+  // depends on perl and does not depend on python.
+  readonly property string safeReadScript:
+    "use strict; use Fcntl qw(:DEFAULT :mode);" +
+    "sysopen(my $fh, $ARGV[0], O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or exit 1;" +
+    "my @s = stat($fh) or exit 1;" +
+    "exit 1 unless S_ISREG($s[2]);" +          // a regular file, not a device
+    "exit 1 unless $s[4] == $<;" +             // owned by us
+    "exit 1 if $s[3] > 1;" +                   // no extra hard links
+    "exit 1 if $s[7] > 8192;" +                // small
+    "exit 1 if ($s[2] & 0022);" +              // not group- or world-writable
+    "my $buf = \"\"; sysread($fh, $buf, 8192); print $buf;"
+
   Process {
     id: weatherReader
-    command: ["timeout", "2", "head", "-c", "8192", "--", root.weatherPath]
+    command: ["perl", "-e", root.safeReadScript, root.weatherPath]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -137,17 +153,21 @@ Panel {
   readonly property bool hasSite: isFinite(siteLat) && isFinite(siteLon)
   readonly property bool needsGeocode: !hasOwnCoords && !weatherHasCoords && weatherName !== ""
 
-  onNeedsGeocodeChanged: if (needsGeocode && weatherName !== geocodedFor) geocodeProc.running = true
-  onWeatherNameChanged: if (needsGeocode && weatherName !== geocodedFor) geocodeProc.running = true
+  onNeedsGeocodeChanged: if (needsGeocode) fetchGeocode()
+  onWeatherNameChanged: if (needsGeocode) fetchGeocode()
 
   Process {
     id: geocodeProc
-    command: ["curl", "-fsS", "-A", root.ua, "--max-time", "8",
-              "https://geocoding-api.open-meteo.com/v1/search?name="
-              + encodeURIComponent(root.weatherName) + "&count=1&language=en&format=json"]
+    command: ["true"]              // replaced in fetchGeocode()
+    onExited: root.startPending(3)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        if (!root.fresh(3)) return
+        // Bound to the name this lookup was launched for, not to whatever the
+        // setting says by the time the answer arrives.
+        var forName = root.requestKey[3]
+        if (forName !== root.weatherName) return
         try {
           var parsed = root.parseBounded(text)
           var r = parsed ? parsed.results : null
@@ -156,7 +176,7 @@ Panel {
             root.geocodedLon = parseFloat(r[0].longitude)
             // Remember which name these came from, so a later rename refetches
             // and a failed lookup is not mistaken for a good one.
-            root.geocodedFor = root.weatherName
+            root.geocodedFor = forName
           }
         } catch (e) { /* leave the location unresolved */ }
       }
@@ -175,6 +195,11 @@ Panel {
 
   // Both come from the API and both are displayed; the identifier also goes
   // into a URL, so it is held to the shape an ICAO code actually has.
+  // Clamped once, where the observation is taken in, rather than at each place
+  // it is shown — a 250 kB "raw report" would otherwise become a persistent
+  // Text item however carefully the tab is written.
+  readonly property string rawMetar: obs ? safe(obs.rawOb, 400) : ""
+
   readonly property string stationId: obs ? String(obs.icaoId || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6) : ""
   readonly property string stationName: obs ? safe(obs.name, 48) : ""
 
@@ -301,7 +326,10 @@ Panel {
   readonly property int maxFieldChars: 72
 
   function curlTo(url, seconds) {
-    return ["curl", "-fsS", "-A", ua,
+    // -q must come first: without it curl reads ~/.curlrc, which could add a
+    // proxy, an output file, or --insecure to what is otherwise a fixed
+    // request.
+    return ["curl", "-q", "-fsS", "-A", ua,
             "--proto", "=https",                 // refuse anything but https
             "--max-time", String(seconds),
             "--max-filesize", String(maxResponseBytes),
@@ -339,42 +367,80 @@ Panel {
     return v.length > cap ? v.slice(0, cap) : v
   }
 
-  // Every request is stamped with the generation and the station it was made
-  // for, and a completion whose stamp no longer matches is discarded. Without
-  // this a forecast that was in flight when the station changed would be
-  // accepted and then marked as belonging to the *new* airfield — stale data
-  // wearing the right label, which is worse than no data.
+  // Every request is stamped with the generation and the key it was made for,
+  // and a completion whose stamp no longer matches is discarded.
+  //
+  // The stamps live per process and are never overwritten while the run they
+  // belong to is still in flight: a superseded process can still flush its
+  // collector after `running = false`, and if the replacement had already
+  // rewritten the stamps that stale output would validate against the *new*
+  // request's checks. So a replacement is queued and started from onExited,
+  // by which point the old collector has already run and been rejected.
   property int fetchGen: 0
-  property int stationGen: -1
-  property int boxGen: -1
-  property int tafGen: -1
-  property string tafRequestedFor: ""
+  property var procGen: [-1, -1, -1, -1]        // station, box, taf, geocode
+  property var requestKey: ["", "", "", ""]
+  property var pendingCmd: [null, null, null, null]
+  property var pendingKey: ["", "", "", ""]
+
+  readonly property var guardedProcs: [stationProc, boxProc, tafProc, geocodeProc, weatherReader]
+  readonly property var guardLimits: [15, 20, 15, 8, 4]
+  property var guardStarted: [0, 0, 0, 0, 0]
+
+  function procAt(i) { return guardedProcs[i] }
+
+  // Start now if the process is idle, otherwise queue and let onExited start it.
+  function launch(i, cmd, key) {
+    var pc = pendingCmd, pk = pendingKey
+    pc[i] = cmd; pk[i] = key
+    pendingCmd = pc; pendingKey = pk
+    var proc = procAt(i)
+    if (proc.running) { proc.running = false; return }   // onExited starts it
+    startPending(i)
+  }
+
+  function startPending(i) {
+    var cmd = pendingCmd[i]
+    // Clearing the deadline here as well as on start means an exit always
+    // leaves the slot idle, whether or not anything is queued behind it.
+    var started = guardStarted; started[i] = 0; guardStarted = started
+    if (!cmd) return
+    var pc = pendingCmd; pc[i] = null; pendingCmd = pc
+    var g = procGen; g[i] = fetchGen; procGen = g
+    var k = requestKey; k[i] = pendingKey[i]; requestKey = k
+    var proc = procAt(i)
+    proc.command = cmd
+    // Bound to the moment of launch, not to whenever the watchdog next ticks —
+    // otherwise a quick completion followed by a new run inherits the previous
+    // run's age and can be killed early.
+    started = guardStarted; started[i] = Date.now(); guardStarted = started
+    proc.running = true
+  }
+
+  function fresh(i) { return procGen[i] === fetchGen }
 
   function invalidate() {
     fetchGen += 1
-    // Reap anything still in flight for the previous generation rather than
-    // letting it land late.
-    if (stationProc.running) stationProc.running = false
-    if (boxProc.running) boxProc.running = false
-    if (tafProc.running) tafProc.running = false
+    var pc = pendingCmd
+    for (var i = 0; i < guardedProcs.length - 1; i++) {
+      pc[i] = null
+      if (guardedProcs[i].running) guardedProcs[i].running = false
+    }
+    pendingCmd = pc
     loading = false
   }
+
 
   function refresh() {
     if (loading) return
     if (wantedStation !== "") {
       loading = true
-      stationGen = fetchGen
-      stationProc.command = curlTo(api + "metar?ids=" + wantedStation + "&format=json", 15)
-      stationProc.running = true
+      launch(0, curlTo(api + "metar?ids=" + wantedStation + "&format=json", 15), wantedStation)
       return
     }
     var box = bboxString()
     if (box === "") return          // no location resolved yet; onHasSiteChanged retries
     loading = true
-    boxGen = fetchGen
-    boxProc.command = curlTo(api + "metar?bbox=" + box + "&format=json", 20)
-    boxProc.running = true
+    launch(1, curlTo(api + "metar?bbox=" + box + "&format=json", 20), box)
   }
 
   function fetchTaf() {
@@ -382,14 +448,16 @@ Panel {
     // A forecast already in flight for a different station is superseded, not
     // a reason to skip: the previous behaviour refused the new request and then
     // stamped the old answer with the new station's id.
-    if (tafProc.running) {
-      if (tafRequestedFor === stationId) return
-      tafProc.running = false
-    }
-    tafGen = fetchGen
-    tafRequestedFor = stationId
-    tafProc.command = curlTo(api + "taf?ids=" + stationId + "&format=json", 15)
-    tafProc.running = true
+    if (tafProc.running && requestKey[2] === stationId) return
+    launch(2, curlTo(api + "taf?ids=" + stationId + "&format=json", 15), stationId)
+  }
+
+  function fetchGeocode() {
+    if (weatherName === "" || geocodedFor === weatherName) return
+    if (geocodeProc.running && requestKey[3] === weatherName) return
+    launch(3, curlTo("https://geocoding-api.open-meteo.com/v1/search?name="
+                     + encodeURIComponent(weatherName) + "&count=1&language=en&format=json", 8),
+           weatherName)
   }
 
   Component.onCompleted: refresh()
@@ -397,8 +465,8 @@ Panel {
   // Refetch when the resolved location or the named station changes.
   onHasSiteChanged: if (hasSite && !obs) refresh()
   onWantedStationChanged: { invalidate(); obs = null; tafFor = ""; tafPeriodList = []; rawTaf = ""; refresh() }
-  onSiteLatChanged: if (wantedStation === "") invalidate()
-  onSiteLonChanged: if (wantedStation === "") invalidate()
+  onSiteLatChanged: if (wantedStation === "") { invalidate(); refresh() }
+  onSiteLonChanged: if (wantedStation === "") { invalidate(); refresh() }
 
   // Observations are issued about hourly, with unscheduled specials in
   // between, so ten minutes keeps the pill honest without hammering a public
@@ -407,12 +475,9 @@ Panel {
 
   // curl's --max-time is curl's to honour, and it is the only clock the
   // subprocess has. This is an independent one: any fetch still alive past its
-  // own limit plus a grace period is terminated from here, which also unsticks
-  // `loading` if a process wedges without ever exiting.
-  readonly property var guardedProcs: [stationProc, boxProc, tafProc, geocodeProc]
-  readonly property var guardLimits: [15, 20, 15, 8]
-  property var guardStarted: [0, 0, 0, 0]
-
+  // own limit plus a grace period is terminated from here. The deadline is set
+  // at launch (see startPending) rather than by this timer, so a quick
+  // completion followed by a new run cannot inherit the old run's age.
   Timer {
     interval: 2000
     running: true
@@ -422,8 +487,7 @@ Panel {
       var started = root.guardStarted
       for (var i = 0; i < root.guardedProcs.length; i++) {
         var proc = root.guardedProcs[i]
-        if (!proc.running) { started[i] = 0; continue }
-        if (!started[i]) { started[i] = now; continue }
+        if (!proc.running || !started[i]) continue
         if (now - started[i] > (root.guardLimits[i] + 5) * 1000) {
           proc.running = false      // Quickshell terminates the child
           started[i] = 0
@@ -507,11 +571,11 @@ Panel {
   Process {
     id: stationProc
     command: ["true"]               // replaced in refresh(), see bboxString()
-    onExited: root.loading = false
+    onExited: { root.loading = false; root.startPending(0) }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (root.stationGen !== root.fetchGen) return      // superseded
+        if (!root.fresh(0) || root.requestKey[0] !== root.wantedStation) return
         try {
           root.applyObs(root.parseBounded(text))
         } catch (e) { root.lastError = "could not read the observation" }
@@ -536,11 +600,11 @@ Panel {
   Process {
     id: boxProc
     command: ["true"]               // replaced in refresh(), see bboxString()
-    onExited: root.loading = false
+    onExited: { root.loading = false; root.startPending(1) }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (root.boxGen !== root.fetchGen) return          // superseded
+        if (!root.fresh(1)) return                        // superseded
         try {
           var list = root.parseBounded(text)
           if (!list || !list.length) { root.lastError = "no station reporting nearby"; return }
@@ -553,13 +617,14 @@ Panel {
   Process {
     id: tafProc
     command: ["true"]               // replaced in fetchTaf()
+    onExited: root.startPending(2)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         // The forecast belongs to the station it was requested for, never to
         // whichever station happens to be selected when it lands.
-        var forStation = root.tafRequestedFor
-        if (root.tafGen !== root.fetchGen || forStation !== root.stationId) return
+        var forStation = root.requestKey[2]
+        if (!root.fresh(2) || forStation !== root.stationId) return
         try {
           var arr = root.parseBounded(text)
           if (!arr || !arr.length) {
@@ -1081,7 +1146,7 @@ Panel {
           Text {
             textFormat: Text.PlainText
             width: parent.width
-            text: root.obs ? String(root.obs.rawOb || "") : "—"
+            text: root.rawMetar !== "" ? root.rawMetar : "—"
             color: Color.popups.text
             font.family: Style.font.family
             font.pixelSize: Style.space(11)
