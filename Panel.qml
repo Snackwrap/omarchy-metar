@@ -20,6 +20,7 @@ Panel {
 
   property var anchorItem: null
   property var hostWidget: null
+  property var panelFrame: null
   readonly property var barIdentity: hostWidget || root
 
   // Live clock tick, so the age of the observation advances without refetching.
@@ -58,6 +59,12 @@ Panel {
   // One switch for every flourish: the barb's turn and gust sway, the forecast
   // wipe, and the colour fades. Off leaves the panel completely still.
   readonly property bool animOn: boolSetting("animations", true)
+  // Screenshot helper. The popup is drawn inside a fullscreen layer surface, so
+  // nothing outside the shell can work out its rectangle — the compositor only
+  // sees the surface. With this on the panel prints its own rect on open, which
+  // is what tools/capture-preview.sh crops to. Exact, and immune to whatever
+  // else happens to be moving on the desktop.
+  readonly property bool debugGeometry: boolSetting("debugGeometry", false)
 
   // ---- Location ---------------------------------------------------------
   // Inherited from the built-in weather widget, which stores whatever the user
@@ -297,6 +304,40 @@ Panel {
     if (!opened) return
     refresh()
     Qt.callLater(playForView)
+    if (debugGeometry) geometryTimer.restart()
+  }
+
+  // Wait for the layout to settle before measuring: text wrapping and the
+  // opening animations both change the panel's height, and a rect reported on
+  // the first frame crops the bottom off. The panel also grows again when a
+  // second request lands — the forecast arrives after the observation that
+  // names its station — so any resize re-arms this and the caller takes the
+  // last rect reported.
+  Timer {
+    id: geometryTimer
+    interval: 1200
+    onTriggered: root.reportGeometry()
+  }
+
+  Connections {
+    target: root.debugGeometry ? root.panelFrame : null
+    function onHeightChanged() { geometryTimer.restart() }
+  }
+
+  function reportGeometry() {
+    if (!panelFrame) return
+    // The layer surface is the whole screen, so a point mapped out of the
+    // panel's own item is already in screen coordinates. What that item covers
+    // is the *content*, though; the popup people see also has the panel's
+    // padding and its border around it, so grow the rect by both rather than
+    // cropping through the frame. Taken from the panel itself so it stays right
+    // under a different theme or scale.
+    var inset = panel.padding + Math.max(1, Style.space(2))
+    var origin = panelFrame.mapToGlobal(0, 0)
+    console.log("METAR_GEOMETRY "
+                + Math.round(origin.x - inset) + " " + Math.round(origin.y - inset) + " "
+                + Math.round(panelFrame.width + inset * 2) + " "
+                + Math.round(panelFrame.height + inset * 2))
   }
 
   function playForecast() { if (timeline) timeline.play() }
@@ -463,6 +504,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      Component.onCompleted: root.panelFrame = keyCatcher
       onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
 
@@ -470,6 +512,7 @@ Panel {
         id: content
         width: parent.width
         spacing: Style.space(10)
+
 
         // Masthead: glyph and wordmark, with the station on the right.
         Item {

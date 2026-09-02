@@ -1,5 +1,7 @@
 # Aviation Weather — Omarchy bar plugin
 
+![omarchy-metar](preview.png)
+
 The flight category at your nearest airfield, as a colored pill in the
 [Omarchy](https://omarchy.org) (Quattro) bar. Green through magenta is the same
 scale every aviation chart uses, so it reads without being read.
@@ -129,6 +131,12 @@ by searching around your location rather than around the station.
   The height axis is square-root compressed and its top follows the highest
   layer, because a scale fixed at twelve thousand feet squashes a low overcast
   day into the bottom two pixels.
+- `tools/capture-preview.sh` + `tools/build-preview.sh` — regenerate the listing
+  card. The popup is drawn inside a fullscreen layer surface, so the compositor
+  cannot report where it is; with `debugGeometry` set the panel prints its own
+  frame on open and the capture crops to exactly that. Shooting the screen open
+  and closed and diffing is the obvious alternative and it loses to anything
+  else that moves — an animated wallpaper, a video, a blinking cursor.
 - `TafTimeline.qml` — the forecast strip. TEMPO and PROB groups describe a
   temporary deviation inside another period rather than a period of their own,
   so they are drawn as a thin band underneath; letting a thirty-minute TEMPO
